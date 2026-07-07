@@ -33,6 +33,10 @@ Two Sparkle.Net bugs were fixed upstream (in the `PDFSparkle.Net` repo, not here
 - `Utils/HashSet.cs` iterated in reference-hash order, making `/Font`, `/XObject`, `/ExtGState` and `/Pattern` resource dictionaries non-deterministic. Now insertion-ordered.
 - `PDF/Image.cs` read `SKBitmap.Pixels` (which copies the whole pixel array) *inside* the per-pixel loop — O(width × height²) instead of O(width × height), effectively hanging on any non-trivial image. Fixed to read once outside the loop.
 
+## Other upstream Sparkle.Net fixes
+
+- **Colour-key `/Mask` hiding opaque content.** `PDF/Image.cs` used a PDF colour-key `/Mask` (matches by RGB only, ignores alpha) whenever an image had a single uniform transparent colour. If an opaque pixel elsewhere in the image happened to share that RGB — e.g. a GIF using black as both its transparent index *and* a real background colour — the colour key punched a hole through that opaque content too, letting the page background show through where real image content should be. Fixed to use a real per-pixel `SMask` whenever an image has both transparent and opaque pixels, not only when two differently-coloured transparent pixels are found.
+
 ## Known limitations vs. Morph.Pdf
 
 - **No page trimming.** `options.Pages` only early-exits the render loop (skips laying out pages past the requested range) — it can't remove already-created pages from the output, because Sparkle.Net's public `IPageCollection` has no `Remove`/`RemoveAt`. `Morph.Pdf` can trim via `PdfDocument.Pages.RemoveAt`.
