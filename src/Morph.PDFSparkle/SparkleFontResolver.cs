@@ -13,7 +13,10 @@ namespace Morph;
 sealed class SparkleFontResolver
 {
     Dictionary<(string Family, bool Bold, bool Italic), string> index = [];
-    string? defaultFace;
+    // One default per style axis so an unresolved family still lands on the requested
+    // slant/weight instead of whatever ordinal-first TTF happens to be indexed (which was
+    // Aharoni Bold in the bundled set, making every unknown family render as bold).
+    Dictionary<(bool Bold, bool Italic), string> defaultByStyle = [];
 
     public SparkleFontResolver(string? directory)
     {
@@ -87,7 +90,28 @@ sealed class SparkleFontResolver
             index.TryAdd((declaredName.ToLowerInvariant(), bold, italic), path);
         }
 
-        defaultFace ??= path;
+        defaultByStyle.TryAdd((bold, italic), path);
+    }
+
+    string? DefaultFaceFor(bool bold, bool italic)
+    {
+        // Prefer exact style, then relax italic before weight (a slanted regular reads closer
+        // to a slanted bold than an upright bold does), then fall back to anything indexed.
+        (bool Bold, bool Italic)[] attempts =
+        [
+            (bold, italic),
+            (bold, !italic),
+            (!bold, italic),
+            (!bold, !italic)
+        ];
+        foreach (var attempt in attempts)
+        {
+            if (defaultByStyle.TryGetValue(attempt, out var path))
+            {
+                return path;
+            }
+        }
+        return null;
     }
 
     static IEnumerable<string> ReadDeclaredNames(string path)
@@ -143,6 +167,6 @@ sealed class SparkleFontResolver
             }
         }
 
-        return defaultFace;
+        return DefaultFaceFor(bold, italic);
     }
 }
