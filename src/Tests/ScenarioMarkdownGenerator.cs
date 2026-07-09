@@ -195,7 +195,7 @@ static class ScenarioMarkdownGenerator
                 var pdfMetric = pdfMetrics.TryGetValue(i + 1, out var metric) ? metric : (double?) null;
 
                 sb.Append("| ");
-                sb.Append(RenderLabel(pageLabel, null, expectedFile));
+                sb.Append(RenderExpectedLabel(pageLabel, expectedFile, pdfMetric.HasValue));
                 sb.Append(" | ");
                 sb.Append(RenderLabel(pageLabel, pdfMetric, pdfFile));
                 sb.Append(" |\n");
@@ -245,7 +245,7 @@ static class ScenarioMarkdownGenerator
             // One row of labels (page + ErrorMetric) and a separate row for the images
             // beneath, so each cell's text and image stack vertically inside the table.
             sb.Append("| ");
-            sb.Append(RenderLabel(pageLabel, null, page.ExpectedFile));
+            sb.Append(RenderExpectedLabel(pageLabel, page.ExpectedFile, page.SkiaMetric.HasValue || page.ImageSharpMetric.HasValue));
             sb.Append(" | ");
             sb.Append(RenderLabel(pageLabel, page.SkiaMetric, page.SkiaFile));
             sb.Append(" | ");
@@ -286,6 +286,30 @@ static class ScenarioMarkdownGenerator
             ? $"{pageLabel}. ErrorMetric: {metric.Value:F4}"
             : pageLabel;
         return $"**{label}**";
+    }
+
+    // GitHub sizes each table column to its widest non-breaking token, and images carry
+    // max-width:100% so they can never widen a column. In the comparison tables the sibling
+    // columns (Skia/ImageSharp, or Morph PDF) are sized by their "ErrorMetric: 0.xxxx" label,
+    // but the Expected column's bare "Page N" is far narrower — so GitHub shrank the Expected
+    // image relative to the others. Pad the Expected label with non-breaking spaces so its
+    // token matches the ErrorMetric label width, equalizing the columns (and their images).
+    // The count was calibrated against GitHub's table CSS in a browser; because the columns
+    // are sized by min-content it is independent of the reader's viewport width.
+    static readonly string expectedLabelPadding = string.Concat(Enumerable.Repeat("&nbsp;", 19));
+
+    // siblingHasMetric: whether a non-Expected column in this row renders an "ErrorMetric: …"
+    // label (and is therefore wider than a bare "Page N"); only then does padding equalize
+    // rather than over-widen the Expected column.
+    static string RenderExpectedLabel(string pageLabel, string? expectedFile, bool siblingHasMetric)
+    {
+        var label = RenderLabel(pageLabel, null, expectedFile);
+        if (expectedFile != null && siblingHasMetric)
+        {
+            return label + expectedLabelPadding;
+        }
+
+        return label;
     }
 
     static string RenderImage(string? fileName, string srcPrefix)
