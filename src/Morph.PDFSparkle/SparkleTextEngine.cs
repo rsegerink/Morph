@@ -30,9 +30,13 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
 
     // ---- IParagraphMeasurer ----
 
+    // The table-cell measurers take the cell's inner width and remove BOTH indents to get the wrap
+    // width, exactly as RenderInBounds draws it and as the Skia/ImageSharp measurers do. Previously
+    // they passed the raw width to Layout, so a left- or right-indented cell paragraph was measured
+    // wider than it renders — the row was under-sized.
     public List<float> LayoutParagraphForMeasurement(ParagraphElement paragraph, float maxWidth)
     {
-        var lines = Layout(paragraph, maxWidth);
+        var lines = Layout(paragraph, maxWidth - (float)Indent(paragraph) - (float)RightIndent(paragraph));
         var heights = new List<float>(lines.Count);
         foreach (var line in lines)
             heights.Add(line.Height);
@@ -41,23 +45,30 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
         return heights;
     }
 
+    // Autofit column widths use this for a cell paragraph's natural (unwrapped) and minimum (widest
+    // word) content width, probed with sentinel widths. Returns the bare widest line width — the
+    // shared TableLayout adds cell padding/margin itself. Adding the left indent here made the PDF's
+    // autofit columns a left-indent wider than the Skia/ImageSharp measurers (which return bare
+    // widest); the raster is the reference, so match it.
     public float MeasureParagraphNaturalWidth(ParagraphElement paragraph, float maxWidth)
     {
         var widest = 0f;
         foreach (var line in Layout(paragraph, maxWidth))
             widest = Math.Max(widest, line.Width);
-        return widest + (float)Indent(paragraph);
+        return widest;
     }
 
     public float MeasureParagraphHeightWithWidth(ParagraphElement paragraph, float maxWidth) =>
-        MeasureHeight(paragraph, maxWidth);
+        MeasureHeight(paragraph, maxWidth - (float)Indent(paragraph) - (float)RightIndent(paragraph));
 
     // Height the paragraph will consume in the page flow: MeasureHeight with the cross-paragraph
     // spacing collapse that Draw applies (max(after, before) between neighbours) folded in, so
     // keep decisions test the height that drawing will actually use. previousSpacingAfter is the
-    // spacing-after of whatever renders before this paragraph. Mirrors PdfTextEngine.
+    // spacing-after of whatever renders before this paragraph. maxWidth is the full section
+    // content width; the paragraph's left and right indents are subtracted here so the measured
+    // wrap matches what Draw draws (both now honour the right indent — issue #151 follow-up).
     public float MeasureFlowHeight(ParagraphElement paragraph, float maxWidth, float previousSpacingAfter) =>
-        MeasureHeight(paragraph, maxWidth) - Math.Min(SpacingBefore(paragraph), previousSpacingAfter);
+        MeasureHeight(paragraph, maxWidth - (float)Indent(paragraph) - (float)RightIndent(paragraph)) - Math.Min(SpacingBefore(paragraph), previousSpacingAfter);
 
     float MeasureHeight(ParagraphElement paragraph, float maxWidth)
     {
@@ -114,14 +125,18 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
 
     public void Render(ParagraphElement paragraph)
     {
-        var maxWidth = context.ContentWidth - (float)Indent(paragraph);
+        var maxWidth = context.ContentWidth - (float)Indent(paragraph) - (float)RightIndent(paragraph);
         Draw(paragraph, context.ContentLeft + (float)Indent(paragraph), maxWidth, allowPageBreak: true);
     }
 
+    // Draws the paragraph constrained to a bounded region (table cell), no page breaks.
+    // maxWidth is the region's inner width; both indents come off the wrap width (a bulleted /
+    // right-indented cell paragraph wraps within the indented region) while only the left indent
+    // shifts the start position.
     public void RenderInBounds(ParagraphElement paragraph, float x, float maxWidth)
     {
         var indent = (float)Indent(paragraph);
-        Draw(paragraph, x + indent, maxWidth - indent, allowPageBreak: false);
+        Draw(paragraph, x + indent, maxWidth - indent - (float)RightIndent(paragraph), allowPageBreak: false);
     }
 
     void Draw(ParagraphElement paragraph, float left, float availableWidth, bool allowPageBreak)
@@ -203,14 +218,20 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
             var lineTop = context.CurrentY;
             var baseline = lineTop + line.Ascent;
 
-            var penX = left;
+            // The first line's start shifts by its signed offset (see FirstLineOffset): right for a
+            // first-line indent, LEFT (outdent) for a markerless hanging indent; its alignment box
+            // resizes to match (Layout adjusted the wrap width the same way). Continuation lines sit
+            // at the left indent unchanged.
+            var firstLineOffset = lineIndex == 0 ? (float)FirstLineOffset(paragraph) : 0f;
+            var lineWidth = availableWidth - firstLineOffset;
+            var penX = left + firstLineOffset;
             var extraSpace = 0f;
             if (alignment == TextAlignment.Center)
-                penX += Math.Max(0, (availableWidth - line.Width) / 2);
+                penX += Math.Max(0, (lineWidth - line.Width) / 2);
             else if (alignment == TextAlignment.Right)
-                penX += Math.Max(0, availableWidth - line.Width);
+                penX += Math.Max(0, lineWidth - line.Width);
             else if (alignment == TextAlignment.Justify && line is { IsLast: false, SpaceCount: > 0 })
-                extraSpace = Math.Max(0, availableWidth - line.Width) / line.SpaceCount;
+                extraSpace = Math.Max(0, lineWidth - line.Width) / line.SpaceCount;
 
             if (!markerDrawn && paragraph.Properties.Numbering is { Text.Length: > 0 } numbering)
             {
@@ -399,6 +420,23 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
 
     static double Indent(ParagraphElement paragraph) => paragraph.Properties.LeftIndentPoints;
 
+    // Right indent narrows the wrap width the same way the left indent does — and a NEGATIVE right
+    // indent (common in resume / multi-column templates) WIDENS it past the normal content edge.
+    // The Skia/ImageSharp backends subtract it from the wrap width; the Sparkle backend used to drop
+    // it, so right-indented paragraphs wrapped at a Word-divergent width.
+    static double RightIndent(ParagraphElement paragraph) => paragraph.Properties.RightIndentPoints;
+
+    // The first line's signed offset from the left indent. A positive first-line indent (w:firstLine)
+    // pushes it right; a hanging indent (w:hanging, mutually exclusive with w:firstLine) OUTDENTS it
+    // left to L - hanging — but only for a markerless paragraph. A numbered/bulleted list keeps its
+    // first-line TEXT at the left indent and hangs the marker into the gap instead (drawn separately),
+    // so the outdent must not apply there. Word draws a "bibliography" hanging paragraph's first line
+    // at the margin (L - hanging) with continuation lines at L; the raster leaves the first line at L
+    // (and over-indents continuation), so this deliberately diverges from the raster to match Word.
+    static double FirstLineOffset(ParagraphElement paragraph) =>
+        paragraph.Properties.FirstLineIndentPoints -
+        (paragraph.Properties.Numbering == null ? paragraph.Properties.HangingIndentPoints : 0);
+
     float MeasureString(string text, SparkleFont font)
     {
         SetMeasureFont(font);
@@ -488,14 +526,22 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
             };
 
         var leftIndent = (float)Indent(paragraph);
-        var rightMarginPoints = (float)context.PageSettings.MarginRight;
+
+        // Each line wraps at EffectiveWidth() — the wrap width the caller derived by removing the
+        // paragraph's left/right indents, adjusted on the FIRST line by its signed offset (see
+        // FirstLineOffset): a first-line indent narrows it; a markerless hanging indent outdents the
+        // line so it wraps that much WIDER. Draw shifts the first line's start to match.
+        //
+        // Continuation lines are NOT shifted for a hanging indent: the Sparkle backend draws them at
+        // the left indent (where Word puts them), whereas the raster shifts them a further
+        // hanging-indent right — a raster bug, so matching it would regress.
+        var firstLineIndent = (float)FirstLineOffset(paragraph);
+        float EffectiveWidth() => lines.Count == 0 ? availableWidth - firstLineIndent : availableWidth;
+
         var current = new Line();
         var pendingSpaceWidth = 0f;
         SparkleFont? pendingSpaceFont = null;
         RunProperties? pendingSpaceProps = null;
-        var lineHasTab = false;
-
-        float WrapLimit() => lineHasTab ? availableWidth + rightMarginPoints : availableWidth;
 
         void Flush()
         {
@@ -505,7 +551,7 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
                 lines.Add(current);
             }
             current = new Line();
-            pendingSpaceWidth = 0; pendingSpaceFont = null; pendingSpaceProps = null; lineHasTab = false;
+            pendingSpaceWidth = 0; pendingSpaceFont = null; pendingSpaceProps = null;
         }
 
         void Account(LineItem item)
@@ -529,7 +575,7 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
                 if (data == null) continue;
                 var w = run.InlineImageWidthPoints > 0 ? (float)run.InlineImageWidthPoints : 12f;
                 var h = run.InlineImageHeightPoints > 0 ? (float)run.InlineImageHeightPoints : 12f;
-                if (current.Items.Count > 0 && current.Width + pendingSpaceWidth + w > WrapLimit())
+                if (current.Items.Count > 0 && current.Width + pendingSpaceWidth + w > EffectiveWidth())
                     Flush();
                 Account(new LineItem { IsImage = true, ImageData = data, ImageWidth = w, ImageHeight = h, Width = w, Ascent = h, Height = h });
                 continue;
@@ -561,9 +607,9 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
                     var (destination, matchedStop, suppressFollowing) = TabStopResolver.Resolve(
                         cursorFromLeft, () => MeasureFollowingWidth(paragraph.Runs, runIndex + 1),
                         paragraph.Properties.TabStops, paragraph.Properties.DefaultTabStopPoints,
-                        leftIndent, decimalPrefix, availableEndX: leftIndent + availableWidth);
+                        leftIndent, decimalPrefix, availableEndX: leftIndent + EffectiveWidth());
                     var gap = (float)(destination - cursorFromLeft);
-                    if (gap > 0 && current.Width + gap <= WrapLimit())
+                    if (gap > 0 && current.Width + gap <= EffectiveWidth())
                     {
                         Account(new LineItem
                         {
@@ -571,7 +617,6 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
                             IsTabFiller = true, TabLeader = matchedStop?.Leader ?? TabLeader.None,
                             Ascent = ascent, Height = lineHeight
                         });
-                        lineHasTab = true;
                     }
                     if (suppressFollowing)
                         runIndex = SkipFollowingTabContent(paragraph.Runs, runIndex);
@@ -600,7 +645,7 @@ sealed class SparkleTextEngine(SparkleRenderContext context) : IParagraphMeasure
                 }
 
                 var wordWidth = MeasureString(token.Text, font);
-                if (current.Items.Count > 0 && current.Width + pendingSpaceWidth + wordWidth > WrapLimit())
+                if (current.Items.Count > 0 && current.Width + pendingSpaceWidth + wordWidth > EffectiveWidth())
                     Flush();
                 else if (pendingSpaceWidth > 0 && current.Items.Count > 0)
                 {
