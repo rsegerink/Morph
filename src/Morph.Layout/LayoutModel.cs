@@ -69,6 +69,8 @@ public sealed record LayoutParagraph(int Index, string? StyleId, string? ListLab
 /// when the host lacks it. <see cref="Rotation"/> is the clockwise angle of the baseline in degrees (90
 /// for <c>btLr</c> cell text read bottom to top is -90); for a rotated word <see cref="Box"/> is the
 /// axis-aligned box around it and <see cref="Baseline"/> the Y of its first glyph's baseline origin.
+/// <see cref="FootnoteReferenceId"/> / <see cref="EndnoteReferenceId"/> are set on a note reference mark: the
+/// <c>w:id</c> of the note it cites, matching <see cref="LayoutParagraph.NoteId"/> of that note's paragraphs.
 /// </summary>
 public sealed record LayoutWord(
     string Text,
@@ -79,4 +81,6 @@ public sealed record LayoutWord(
     bool Bold,
     bool Italic,
     bool IsListLabel,
-    double Rotation = 0);
+    double Rotation = 0,
+    string? FootnoteReferenceId = null,
+    string? EndnoteReferenceId = null);

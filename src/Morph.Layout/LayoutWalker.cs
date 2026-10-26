@@ -46,6 +46,10 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
     // as parsed (PlaceTextBox).
     readonly HashSet<ParagraphElement> inTextBox = new(ReferenceEqualityComparer.Instance);
 
+    // Every note reference run's properties to the note it cites. DocumentParser gives each reference mark
+    // its own copy of the properties, which the measurer draws with unchanged unless it emboldens them.
+    readonly Dictionary<RunProperties, (string? Footnote, string? Endnote)> noteReferenceOf = new(ReferenceEqualityComparer.Instance);
+
     // What the items being visited sit inside: the group transforms above them, and the table cell.
     readonly record struct Scope(Matrix3x2 Transform, int? Table, LayoutCellRef? Cell, bool IsRepeatedHeader);
 
@@ -158,6 +162,15 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
         if (noteId != null)
         {
             noteOf.TryAdd(paragraph, noteId);
+        }
+
+        foreach (var run in paragraph.Runs)
+        {
+            if (run.FootnoteReferenceId != null ||
+                run.EndnoteReferenceId != null)
+            {
+                noteReferenceOf.TryAdd(run.Properties, (run.FootnoteReferenceId, run.EndnoteReferenceId));
+            }
         }
 
         if (paragraph.Runs.Any(_ => _.PageField != PageFieldKind.None))
@@ -429,7 +442,7 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
         }
     }
 
-    static List<LayoutWord> Words(List<PlacedGlyph> glyphs, Matrix3x2 transform)
+    List<LayoutWord> Words(List<PlacedGlyph> glyphs, Matrix3x2 transform)
     {
         var words = new List<LayoutWord>();
         var start = -1;
@@ -466,13 +479,19 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
     // A soft hyphen (U+00AD) only marks where Word may break the word, so it is left out of the text, or
     // "Wien\u00ADdels" would not match "Wiendels" downstream; the box still covers whatever Morph drew for it.
     // A word of nothing but soft hyphens is no word.
-    static LayoutWord? Word(List<PlacedGlyph> glyphs, int start, int end, Matrix3x2 transform)
+    LayoutWord? Word(List<PlacedGlyph> glyphs, int start, int end, Matrix3x2 transform)
     {
         var text = new StringBuilder(end - start);
         double left = double.MaxValue, right = double.MinValue, top = double.MaxValue, bottom = double.MinValue;
+        (string? Footnote, string? Endnote) reference = default;
         for (var index = start; index < end; index++)
         {
             var glyph = glyphs[index];
+            if (reference == default)
+            {
+                reference = noteReferenceOf.GetValueOrDefault(glyph.Properties);
+            }
+
             if (glyph.Character != softHyphen)
             {
                 text.Append(glyph.Character);
@@ -499,7 +518,9 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
             first.Properties.Bold,
             first.Properties.Italic,
             first.IsListLabel,
-            Rotation(transform));
+            Rotation(transform),
+            reference.Footnote,
+            reference.Endnote);
     }
 
     // The baseline's direction after the transform, in degrees clockwise (Y runs down the page).
