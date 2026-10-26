@@ -28,8 +28,9 @@ git push origin <branch>
 
 ## Packaging for BladPluizer
 
-`src/Morph.Layout/pack.sh` packs `Morph.Layout` to the local feed (`/mnt/data/Source/nuget_repo`) as
-`<Version>-dev.<timestamp>` and prints that version. The package carries this fork's `Morph.dll` and
+`src/Morph.Layout/pack.sh` packs `Morph.Layout` as `<Version>-dev.<timestamp>`, pushes it to our private
+GitHub Packages feed (`https://nuget.pkg.github.com/rsegerink/index.json`, source name `github`) and prints
+that version. The token for that source sits in your own NuGet config on each machine, not in a repo. The package carries this fork's `Morph.dll` and
 `Morph.Pdf.dll` itself (Morph.Layout reads their internals, so the nuget.org `Morph` packages will not
 do) and depends on AngleSharp, DocumentFormat.OpenXml and Krilla directly. BladPluizer pins the exact
 version in its `Directory.Packages.props`.
