@@ -7,12 +7,25 @@
     <IsAotCompatible>true</IsAotCompatible>
     <NoWarn>CS0618;CS1591;CS1572</NoWarn>
     <Description>Convert docx to PDF plus the word positions in it</Description>
+    <TargetsForTfmSpecificBuildOutput>$(TargetsForTfmSpecificBuildOutput);PackMorphAssemblies</TargetsForTfmSpecificBuildOutput>
   </PropertyGroup>
 
+  <!-- Morph.Layout reads Morph's internals, so it only works against this fork's Morph and Morph.Pdf: the
+       package carries their dlls itself instead of depending on the Morph packages on nuget.org, and takes
+       on their package dependencies directly. -->
   <ItemGroup>
-    <ProjectReference Include="..\Morph.Pdf\Morph.Pdf.csproj" />
+    <ProjectReference Include="..\Morph.Pdf\Morph.Pdf.csproj" PrivateAssets="all" />
+    <PackageReference Include="AngleSharp" />
+    <PackageReference Include="DocumentFormat.OpenXml" />
+    <PackageReference Include="Krilla" />
     <PackageReference Include="ProjectDefaults" PrivateAssets="all" />
     <PackageReference Include="SponsorCheck" PrivateAssets="all" Condition="'$(MORPH_TEST_CONTAINER)' != '1'" />
   </ItemGroup>
+
+  <Target Name="PackMorphAssemblies" DependsOnTargets="ResolveReferences">
+    <ItemGroup>
+      <BuildOutputInPackage Include="@(ReferenceCopyLocalPaths->WithMetadataValue('ReferenceSourceTarget', 'ProjectReference'))" />
+    </ItemGroup>
+  </Target>
 
 </Project>

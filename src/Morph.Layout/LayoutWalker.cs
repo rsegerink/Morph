@@ -389,7 +389,7 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document, Dic
             return null;
         }
 
-        return new(Transform(transform, line.X, line.Y, line.X + line.Width, line.Y + line.Height),
+        return new(LineBox(line, words, transform),
             Transform(transform, line.X, line.Baseline, line.X, line.Baseline).Y,
             ParagraphIndex(line.Paragraph, scope.Cell),
             line.LineIndex,
@@ -533,6 +533,33 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document, Dic
 
         var degrees = Math.Round(Math.Atan2(transform.M12, transform.M11) * 180 / Math.PI, 4);
         return degrees == 0 ? 0 : degrees;
+    }
+
+    // PlacedLine.Width is the natural width of the content: the gap a tab spans is not in it, so on
+    // "logo <right tab> text" the box ends where the text would sit without the tab. Grow it over the
+    // words and inline images, which are placed where they are drawn.
+    static BoundingBox LineBox(PlacedLine line, IReadOnlyList<LayoutWord> words, Matrix3x2 transform)
+    {
+        var box = Transform(transform, line.X, line.Y, line.X + line.Width, line.Y + line.Height);
+        double left = box.X, top = box.Y, right = box.Right, bottom = box.Bottom;
+        foreach (var word in words)
+        {
+            left = Math.Min(left, word.Box.X);
+            top = Math.Min(top, word.Box.Y);
+            right = Math.Max(right, word.Box.Right);
+            bottom = Math.Max(bottom, word.Box.Bottom);
+        }
+
+        foreach (var image in line.Images)
+        {
+            var imageBox = Transform(transform, image.X, image.Y, image.X + image.Width, image.Y + image.Height);
+            left = Math.Min(left, imageBox.X);
+            top = Math.Min(top, imageBox.Y);
+            right = Math.Max(right, imageBox.Right);
+            bottom = Math.Max(bottom, imageBox.Bottom);
+        }
+
+        return new(left, top, right - left, bottom - top);
     }
 
     // The axis-aligned box around a rectangle's four corners after the transform.

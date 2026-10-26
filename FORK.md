@@ -26,6 +26,14 @@ git push origin <branch>
 - Release builds pull in SponsorCheck, which needs a GitHub token. `MORPH_TEST_CONTAINER=1`
   (upstream's own switch in `Morph.csproj`) leaves it out.
 
+## Packaging for BladPluizer
+
+`src/Morph.Layout/pack.sh` packs `Morph.Layout` to the local feed (`/mnt/data/Source/nuget_repo`) as
+`<Version>-dev.<timestamp>` and prints that version. The package carries this fork's `Morph.dll` and
+`Morph.Pdf.dll` itself (Morph.Layout reads their internals, so the nuget.org `Morph` packages will not
+do) and depends on AngleSharp, DocumentFormat.OpenXml and Krilla directly. BladPluizer pins the exact
+version in its `Directory.Packages.props`.
+
 ## History
 
 Before 1.23.3 this fork carried `Morph.PDFSparkle`, a PDF backend on Sparkle.Net, because upstream
