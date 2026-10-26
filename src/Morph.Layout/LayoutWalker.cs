@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Text;
 
 namespace Morph.Layout;
 
@@ -14,8 +15,18 @@ sealed class LayoutWalker(PdfRenderContext context)
     // Two glyphs further apart than this without a character between them are a tab stop, not one word.
     const double tabGapPoints = 1;
 
+    const char softHyphen = '\u00AD';
+
     readonly Dictionary<ParagraphElement, int> paragraphIndex = new(ReferenceEqualityComparer.Instance);
     readonly List<LayoutParagraph> paragraphs = [];
+    readonly Dictionary<TableElement, int> tableIndex = new(ReferenceEqualityComparer.Instance);
+    readonly List<LayoutTable> tables = [];
+
+    // Each table's own cell paragraphs (not those of tables nested in its cells) to the cell holding them.
+    readonly Dictionary<ParagraphElement, LayoutCellRef> cellOf = new(ReferenceEqualityComparer.Instance);
+
+    // What the items being visited sit inside: the group transforms above them, and the table cell.
+    readonly record struct Scope(Matrix3x2 Transform, int? Table, LayoutCellRef? Cell, bool IsRepeatedHeader);
 
     public LayoutDocument Walk(LaidOutDocument document, PageRange? range)
     {
@@ -31,32 +42,50 @@ sealed class LayoutWalker(PdfRenderContext context)
             var lines = new List<LayoutLine>();
             foreach (var item in page.Items)
             {
-                Visit(item, Matrix3x2.Identity, lines);
+                Visit(item, new(Matrix3x2.Identity, null, null, false), lines);
             }
 
             pages.Add(new(pages.Count + 1, page.Settings.WidthPoints, page.Settings.HeightPoints, lines));
         }
 
-        return new(pages, paragraphs);
+        return new(pages, paragraphs, tables);
     }
 
-    // The group transforms as PdfPainter.PaintScaledGroup / PaintRotatedGroup push them. Tables, header and
-    // footer bands as such are not separated yet; table rows are skipped.
-    void Visit(PlacedItem item, Matrix3x2 transform, List<LayoutLine> lines)
+    // The group transforms as PdfPainter.PaintScaledGroup / PaintRotatedGroup push them, and table cells in
+    // the order PdfPainter.PaintTableRow draws them (floats, then content). Header and footer bands as such
+    // are not separated yet.
+    void Visit(PlacedItem item, Scope scope, List<LayoutLine> lines)
     {
         switch (item)
         {
             case PlacedLine line:
-                if (Line(line, transform) is { } placed)
+                if (Line(line, scope) is { } placed)
                 {
                     lines.Add(placed);
+                }
+
+                break;
+            case PlacedTableRow row:
+                var table = TableIndex(row.Table, scope.Table);
+                foreach (var cell in row.Cells)
+                {
+                    var cellScope = scope with
+                    {
+                        Table = table,
+                        Cell = CellOf(cell),
+                        IsRepeatedHeader = scope.IsRepeatedHeader || row.IsRepeatedHeader
+                    };
+                    foreach (var child in cell.Floats.Concat(cell.Content))
+                    {
+                        Visit(child, cellScope, lines);
+                    }
                 }
 
                 break;
             case PlacedClipGroup clip:
                 foreach (var child in clip.Items)
                 {
-                    Visit(child, transform, lines);
+                    Visit(child, scope, lines);
                 }
 
                 break;
@@ -64,7 +93,7 @@ sealed class LayoutWalker(PdfRenderContext context)
                 var scale = Matrix3x2.CreateScale(scaled.Scale) * Matrix3x2.CreateTranslation(scaled.X, scaled.Y);
                 foreach (var child in scaled.Items)
                 {
-                    Visit(child, scale * transform, lines);
+                    Visit(child, scope with { Transform = scale * scope.Transform }, lines);
                 }
 
                 break;
@@ -74,17 +103,105 @@ sealed class LayoutWalker(PdfRenderContext context)
                     new(rotated.X + rotated.Width / 2, rotated.Y + rotated.Height / 2));
                 foreach (var child in rotated.Items)
                 {
-                    Visit(child, rotation * transform, lines);
+                    Visit(child, scope with { Transform = rotation * scope.Transform }, lines);
                 }
 
                 break;
         }
     }
 
-    readonly record struct PlacedGlyph(char Character, double Left, double Right, double Top, double Bottom, double Baseline, PdfFace Face, RunProperties Properties, double SizePoints, bool IsListLabel);
-
-    LayoutLine? Line(PlacedLine line, Matrix3x2 transform)
+    // A placed row leaves out the cells a vertical merge continues (the restart cell's box covers them), so
+    // the n-th placed cell need not be the n-th w:tc. The cell is found through its paragraphs instead,
+    // which are the parsed ones. A cell with no paragraph of its own (only a nested table) has no ref.
+    LayoutCellRef? CellOf(PlacedCell cell)
     {
+        foreach (var item in cell.Content)
+        {
+            if (item is PlacedLine line &&
+                cellOf.TryGetValue(line.Paragraph, out var found))
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    int TableIndex(TableElement table, int? parent)
+    {
+        if (tableIndex.TryGetValue(table, out var index))
+        {
+            return index;
+        }
+
+        index = tables.Count;
+        tableIndex[table] = index;
+        var columnCount = 0;
+        for (var rowIndex = 0; rowIndex < table.Rows.Count; rowIndex++)
+        {
+            var row = table.Rows[rowIndex];
+            var column = row.GridBefore;
+            for (var cellIndex = 0; cellIndex < row.Cells.Count; cellIndex++)
+            {
+                var cell = row.Cells[cellIndex];
+                var reference = new LayoutCellRef(index, rowIndex, column, cell.Properties.GridSpan, RowSpan(table, rowIndex, column));
+                foreach (var paragraph in cell.Content.OfType<ParagraphElement>())
+                {
+                    cellOf.TryAdd(paragraph, reference);
+                }
+
+                column += cell.Properties.GridSpan;
+            }
+
+            columnCount = Math.Max(columnCount, column + row.GridAfter);
+        }
+
+        tables.Add(new(index, parent, table.Rows.Count, columnCount));
+        return index;
+    }
+
+    // The rows a w:vMerge restart at this grid column covers: itself plus each following row whose cell at
+    // the same column continues it.
+    static int RowSpan(TableElement table, int rowIndex, int column)
+    {
+        if (CellAt(table.Rows[rowIndex], column) is not { Properties.VerticalMerge: VerticalMergeType.Restart })
+        {
+            return 1;
+        }
+
+        var span = 1;
+        while (rowIndex + span < table.Rows.Count &&
+               CellAt(table.Rows[rowIndex + span], column) is { Properties.VerticalMerge: VerticalMergeType.Continue })
+        {
+            span++;
+        }
+
+        return span;
+    }
+
+    static TableCell? CellAt(TableRow row, int column)
+    {
+        var start = row.GridBefore;
+        foreach (var cell in row.Cells)
+        {
+            if (start == column)
+            {
+                return cell;
+            }
+
+            start += cell.Properties.GridSpan;
+        }
+
+        return null;
+    }
+
+    // Right is where the glyph's advance ends; PenRight adds the tracking, where the next glyph of the
+    // same word starts.
+    readonly record struct PlacedGlyph(char Character, double Left, double Right, double PenRight, double Top, double Bottom, double Baseline, PdfFace Face, RunProperties Properties, double SizePoints, bool IsListLabel);
+
+    LayoutLine? Line(PlacedLine line, Scope scope)
+    {
+        var transform = scope.Transform;
         var glyphs = new List<PlacedGlyph>();
         var markerRun = line.LineIndex == 0 && line.Paragraph.Properties.Numbering is { Text.Length: > 0 } ? 0 : -1;
         for (var runIndex = 0; runIndex < line.Runs.Count; runIndex++)
@@ -107,9 +224,10 @@ sealed class LayoutWalker(PdfRenderContext context)
 
         return new(Transform(transform, line.X, line.Y, line.X + line.Width, line.Y + line.Height),
             Transform(transform, line.X, line.Baseline, line.X, line.Baseline).Y,
-            ParagraphIndex(line.Paragraph),
+            ParagraphIndex(line.Paragraph, scope.Cell),
             line.LineIndex,
-            words);
+            words,
+            scope.IsRepeatedHeader);
     }
 
     // PdfPainter.DrawTracked / Glyphs: the pen starts at the run's X, each glyph sits at the pen plus its
@@ -142,6 +260,7 @@ sealed class LayoutWalker(PdfRenderContext context)
                     text[i + unit],
                     run.X + left * characterScale,
                     run.X + (left + advance) * characterScale,
+                    run.X + (left + advance + properties.CharacterSpacingPoints) * characterScale,
                     top,
                     bottom,
                     baseline,
@@ -168,10 +287,14 @@ sealed class LayoutWalker(PdfRenderContext context)
                         (glyphs[index].IsListLabel != glyphs[index - 1].IsListLabel ||
                          // a superscript note reference or subscript is a word of its own
                          glyphs[index].Baseline != glyphs[index - 1].Baseline ||
-                         glyphs[index].Left - glyphs[index - 1].Right > tabGapPoints));
+                         glyphs[index].Left - glyphs[index - 1].PenRight > tabGapPoints));
             if (ends && start >= 0)
             {
-                words.Add(Word(glyphs, start, index, transform));
+                if (Word(glyphs, start, index, transform) is { } word)
+                {
+                    words.Add(word);
+                }
+
                 start = -1;
             }
 
@@ -186,30 +309,55 @@ sealed class LayoutWalker(PdfRenderContext context)
         return words;
     }
 
-    static LayoutWord Word(List<PlacedGlyph> glyphs, int start, int end, Matrix3x2 transform)
+    // A soft hyphen (U+00AD) only marks where Word may break the word, so it is left out of the text, or
+    // "Wien\u00ADdels" would not match "Wiendels" downstream; the box still covers whatever Morph drew for it.
+    // A word of nothing but soft hyphens is no word.
+    static LayoutWord? Word(List<PlacedGlyph> glyphs, int start, int end, Matrix3x2 transform)
     {
-        var text = new char[end - start];
+        var text = new StringBuilder(end - start);
         double left = double.MaxValue, right = double.MinValue, top = double.MaxValue, bottom = double.MinValue;
         for (var index = start; index < end; index++)
         {
             var glyph = glyphs[index];
-            text[index - start] = glyph.Character;
+            if (glyph.Character != softHyphen)
+            {
+                text.Append(glyph.Character);
+            }
+
             left = Math.Min(left, glyph.Left);
             right = Math.Max(right, glyph.Right);
             top = Math.Min(top, glyph.Top);
             bottom = Math.Max(bottom, glyph.Bottom);
         }
 
+        if (text.Length == 0)
+        {
+            return null;
+        }
+
         var first = glyphs[start];
         return new(
-            new(text),
+            text.ToString(),
             Transform(transform, left, top, right, bottom),
             Transform(transform, left, first.Baseline, left, first.Baseline).Y,
             first.Face.Family ?? first.Properties.FontFamily,
             first.SizePoints,
             first.Properties.Bold,
             first.Properties.Italic,
-            first.IsListLabel);
+            first.IsListLabel,
+            Rotation(transform));
+    }
+
+    // The baseline's direction after the transform, in degrees clockwise (Y runs down the page).
+    static double Rotation(Matrix3x2 transform)
+    {
+        if (transform.IsIdentity)
+        {
+            return 0;
+        }
+
+        var degrees = Math.Round(Math.Atan2(transform.M12, transform.M11) * 180 / Math.PI, 4);
+        return degrees == 0 ? 0 : degrees;
     }
 
     // The axis-aligned box around a rectangle's four corners after the transform.
@@ -239,7 +387,7 @@ sealed class LayoutWalker(PdfRenderContext context)
         return new(minX, minY, maxX - minX, maxY - minY);
     }
 
-    int ParagraphIndex(ParagraphElement paragraph)
+    int ParagraphIndex(ParagraphElement paragraph, LayoutCellRef? cell)
     {
         if (!paragraphIndex.TryGetValue(paragraph, out var index))
         {
@@ -251,7 +399,8 @@ sealed class LayoutWalker(PdfRenderContext context)
                 properties.StyleId ?? properties.ResolvedStyleId,
                 properties.Numbering is { Text.Length: > 0 } numbering ? numbering.Text : null,
                 properties.Numbering?.Level,
-                paragraph.Source));
+                paragraph.Source,
+                cellOf.GetValueOrDefault(paragraph) ?? cell));
         }
 
         return index;
