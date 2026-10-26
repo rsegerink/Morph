@@ -25,21 +25,33 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
     // Each table's own cell paragraphs (not those of tables nested in its cells) to the cell holding them.
     readonly Dictionary<ParagraphElement, LayoutCellRef> cellOf = new(ReferenceEqualityComparer.Instance);
 
-    // Every header, footer and note paragraph, cell paragraphs included, to the story it belongs to. A paragraph
-    // holding a page field is laid out as a copy per page (Fragmenter.SubstitutePageFields) that keeps the
-    // original's paragraph and run properties; pageFieldBands finds the original back through those.
-    readonly Dictionary<ParagraphElement, LayoutStory> bandOf = new(ReferenceEqualityComparer.Instance);
-    readonly Dictionary<ParagraphProperties, List<ParagraphElement>> pageFieldBands = new(ReferenceEqualityComparer.Instance);
+    // Every parsed paragraph, cell and text box paragraphs included, to the story it belongs to. Fragmenter
+    // lays some out as copies: a paragraph holding a page field once per page (SubstitutePageFields), with the
+    // original's paragraph and run properties, which pageFieldOriginals finds it back through; and a paragraph
+    // on a mirrored page (MirrorForPage) with the original's run list, which runsOwner finds it back through.
+    readonly Dictionary<ParagraphElement, LayoutStory> storyOf = new(ReferenceEqualityComparer.Instance);
+    readonly Dictionary<ParagraphProperties, List<ParagraphElement>> pageFieldOriginals = new(ReferenceEqualityComparer.Instance);
+    readonly Dictionary<IReadOnlyList<Run>, ParagraphElement> runsOwner = new(ReferenceEqualityComparer.Instance);
+
+    // Unwarped WordArt (a text box Morph reads as WordArt, like business/06's "LOGO") is drawn through a
+    // paragraph Fragmenter.LayoutWordArtText builds at layout time, one centred run of the WordArt's text
+    // and font; nothing else links it back, so it is found by those.
+    readonly Dictionary<(string Text, string FontFamily, bool Bold, bool Italic, string? ColorHex), LayoutStory> wordArtOf = [];
     readonly HashSet<HeaderFooterContent> bandsSeen = new(ReferenceEqualityComparer.Instance);
 
     // Every footnote and endnote paragraph to its note's w:id. Fragmenter places them as parsed.
     readonly Dictionary<ParagraphElement, string> noteOf = new(ReferenceEqualityComparer.Instance);
+
+    // Every paragraph inside a text box (w:txbxContent), in any story. Fragmenter places a box's content
+    // as parsed (PlaceTextBox).
+    readonly HashSet<ParagraphElement> inTextBox = new(ReferenceEqualityComparer.Instance);
 
     // What the items being visited sit inside: the group transforms above them, and the table cell.
     readonly record struct Scope(Matrix3x2 Transform, int? Table, LayoutCellRef? Cell, bool IsRepeatedHeader);
 
     public LayoutDocument Walk(LaidOutDocument laidOut, PageRange? range)
     {
+        AddStory(document.Elements, LayoutStory.Body, null);
         AddBands(document.Header, document.Footer, document.FirstPageHeader, document.FirstPageFooter, document.EvenPageHeader, document.EvenPageFooter);
         foreach (var footnote in document.Footnotes)
         {
@@ -93,47 +105,87 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
         }
     }
 
-    void AddStory(IReadOnlyList<DocumentElement> elements, LayoutStory story, string? noteId)
+    void AddStory(IReadOnlyList<DocumentElement> elements, LayoutStory story, string? noteId, bool textBox = false)
     {
         foreach (var element in elements)
         {
             switch (element)
             {
                 case ParagraphElement paragraph:
-                    bandOf.TryAdd(paragraph, story);
-                    if (noteId != null)
-                    {
-                        noteOf.TryAdd(paragraph, noteId);
-                    }
-
-                    if (paragraph.Runs.Any(_ => _.PageField != PageFieldKind.None))
-                    {
-                        if (!pageFieldBands.TryGetValue(paragraph.Properties, out var originals))
-                        {
-                            pageFieldBands[paragraph.Properties] = originals = [];
-                        }
-
-                        originals.Add(paragraph);
-                    }
-
+                    AddParagraph(paragraph, story, noteId, textBox);
+                    break;
+                // A content control is laid out through its one synthetic paragraph.
+                case ContentControlElement {CellParagraph: { } paragraph}:
+                    AddParagraph(paragraph, story, noteId, textBox);
                     break;
                 case TableElement table:
                     foreach (var cell in table.Rows.SelectMany(_ => _.Cells))
                     {
-                        AddStory(cell.Content, story, noteId);
+                        AddStory(cell.Content, story, noteId, textBox);
+                        AddStory(cell.Floats, story, noteId, textBox);
                     }
 
+                    break;
+                case FloatingTextBoxElement box:
+                    AddStory(box.Content, story, noteId, true);
+                    break;
+                case PositionedFrameElement frame:
+                    AddStory(frame.Content, story, noteId, textBox);
+                    break;
+                case WordArtElement wordArt:
+                    wordArtOf.TryAdd((wordArt.Text, wordArt.FontFamily, wordArt.Bold, wordArt.Italic, wordArt.FillColorHex), story);
+                    break;
+                case FloatingWordArtElement wordArt:
+                    wordArtOf.TryAdd((wordArt.Text, wordArt.FontFamily, wordArt.Bold, wordArt.Italic, wordArt.FillColorHex), story);
                     break;
             }
         }
     }
 
-    // The parsed paragraph a placed line belongs to: itself, or for a band paragraph's page-field copy the
-    // band original whose paragraph and run properties it carries.
+    void AddParagraph(ParagraphElement paragraph, LayoutStory story, string? noteId, bool textBox)
+    {
+        storyOf.TryAdd(paragraph, story);
+        if (paragraph.Runs.Count > 0)
+        {
+            runsOwner.TryAdd(paragraph.Runs, paragraph);
+        }
+
+        if (textBox)
+        {
+            inTextBox.Add(paragraph);
+        }
+
+        if (noteId != null)
+        {
+            noteOf.TryAdd(paragraph, noteId);
+        }
+
+        if (paragraph.Runs.Any(_ => _.PageField != PageFieldKind.None))
+        {
+            if (!pageFieldOriginals.TryGetValue(paragraph.Properties, out var originals))
+            {
+                pageFieldOriginals[paragraph.Properties] = originals = [];
+            }
+
+            originals.Add(paragraph);
+        }
+    }
+
+    // The parsed paragraph a placed line belongs to: itself, or for a copy the original it was made from.
     ParagraphElement Original(ParagraphElement paragraph)
     {
-        if (bandOf.ContainsKey(paragraph) ||
-            !pageFieldBands.TryGetValue(paragraph.Properties, out var originals))
+        if (storyOf.ContainsKey(paragraph))
+        {
+            return paragraph;
+        }
+
+        if (paragraph.Runs.Count > 0 &&
+            runsOwner.TryGetValue(paragraph.Runs, out var owner))
+        {
+            return owner;
+        }
+
+        if (!pageFieldOriginals.TryGetValue(paragraph.Properties, out var originals))
         {
             return paragraph;
         }
@@ -216,7 +268,8 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
         foreach (var item in cell.Content)
         {
             if (item is PlacedLine line &&
-                cellOf.TryGetValue(line.Paragraph, out var found))
+                (cellOf.TryGetValue(line.Paragraph, out var found) ||
+                 cellOf.TryGetValue(Original(line.Paragraph), out found)))
             {
                 return found;
             }
@@ -243,9 +296,12 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
             {
                 var cell = row.Cells[cellIndex];
                 var reference = new LayoutCellRef(index, rowIndex, column, cell.Properties.GridSpan, RowSpan(table, rowIndex, column));
-                foreach (var paragraph in cell.Content.OfType<ParagraphElement>())
+                foreach (var element in cell.Content)
                 {
-                    cellOf.TryAdd(paragraph, reference);
+                    if ((element as ParagraphElement ?? (element as ContentControlElement)?.CellParagraph) is { } paragraph)
+                    {
+                        cellOf.TryAdd(paragraph, reference);
+                    }
                 }
 
                 column += cell.Properties.GridSpan;
@@ -493,6 +549,11 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
             index = paragraphs.Count;
             paragraphIndex[paragraph] = index;
             var properties = paragraph.Properties;
+            var (story, textBox) = storyOf.TryGetValue(paragraph, out var parsed)
+                ? (parsed, inTextBox.Contains(paragraph))
+                : WordArtStory(paragraph) is { } wordArt
+                    ? (wordArt, true)
+                    : (LayoutStory.Body, false);
             paragraphs.Add(new(
                 index,
                 properties.StyleId ?? properties.ResolvedStyleId,
@@ -500,10 +561,17 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
                 properties.Numbering?.Level,
                 paragraph.Source,
                 cellOf.GetValueOrDefault(paragraph) ?? cell,
-                bandOf.GetValueOrDefault(paragraph, LayoutStory.Body),
-                noteOf.GetValueOrDefault(paragraph)));
+                story,
+                noteOf.GetValueOrDefault(paragraph),
+                textBox));
         }
 
         return index;
     }
+
+    LayoutStory? WordArtStory(ParagraphElement paragraph) =>
+        paragraph is {Runs: [{Properties: var run} single], Properties.Alignment: TextAlignment.Center} &&
+        wordArtOf.TryGetValue((single.Text, run.FontFamily, run.Bold, run.Italic, run.ColorHex), out var story)
+            ? story
+            : null;
 }

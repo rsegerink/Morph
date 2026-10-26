@@ -57,8 +57,10 @@ public enum LayoutStory
 /// parts (main document first, then headers, footers, footnotes and endnotes); <see cref="Cell"/> is set for a paragraph in a
 /// table cell. A header or footer paragraph appears once, with lines on every page that shows it.
 /// <see cref="NoteId"/> is the <c>w:id</c> of the footnote or endnote a note paragraph belongs to.
+/// <see cref="InTextBox"/> marks a paragraph inside a text box (<c>w:txbxContent</c>); its
+/// <see cref="Story"/> is still the part the box is anchored in.
 /// </summary>
-public sealed record LayoutParagraph(int Index, string? StyleId, string? ListLabel, int? ListLevel, int? Source, LayoutCellRef? Cell = null, LayoutStory Story = LayoutStory.Body, string? NoteId = null);
+public sealed record LayoutParagraph(int Index, string? StyleId, string? ListLabel, int? ListLevel, int? Source, LayoutCellRef? Cell = null, LayoutStory Story = LayoutStory.Body, string? NoteId = null, bool InTextBox = false);
 
 /// <summary>
 /// A run of non-space characters as drawn, possibly spanning several runs. <see cref="Box"/> runs
