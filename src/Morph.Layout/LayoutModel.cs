@@ -41,12 +41,21 @@ public sealed record LayoutPage(int Number, double Width, double Height, IReadOn
 /// </summary>
 public sealed record LayoutLine(BoundingBox Box, double Baseline, int ParagraphIndex, int LineIndex, IReadOnlyList<LayoutWord> Words, bool IsRepeatedHeader = false);
 
+/// <summary>Which part of the document a paragraph comes from.</summary>
+public enum LayoutStory
+{
+    Body,
+    Header,
+    Footer
+}
+
 /// <summary>
 /// A paragraph's structure as the DOCX states it. <see cref="ListLabel"/> is the marker text Morph
-/// drew ("1.", "a)", "•"); <see cref="Source"/> is the ordinal of the <c>w:p</c> in the main document part;
-/// <see cref="Cell"/> is set for a paragraph in a table cell.
+/// drew ("1.", "a)", "•"); <see cref="Source"/> is the ordinal of the <c>w:p</c> across the document's
+/// parts (main document first, then headers and footers); <see cref="Cell"/> is set for a paragraph in a
+/// table cell. A header or footer paragraph appears once, with lines on every page that shows it.
 /// </summary>
-public sealed record LayoutParagraph(int Index, string? StyleId, string? ListLabel, int? ListLevel, int? Source, LayoutCellRef? Cell = null);
+public sealed record LayoutParagraph(int Index, string? StyleId, string? ListLabel, int? ListLevel, int? Source, LayoutCellRef? Cell = null, LayoutStory Story = LayoutStory.Body);
 
 /// <summary>
 /// A run of non-space characters as drawn, possibly spanning several runs. <see cref="Box"/> runs

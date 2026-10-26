@@ -38,7 +38,7 @@ public static class DocxLayoutConverter
 
         using var context = PdfPainter.NewContext(laidOut, document.Compatibility, options.FontWidthScale, options.FontFallback, options.FontDirectory);
         PdfPainter.Paint(laidOut, context, options.RasterizeWordArt, options.OnWarning, options.Pages, cancel);
-        var layout = new LayoutWalker(context).Walk(laidOut, options.Pages);
+        var layout = new LayoutWalker(context, document).Walk(laidOut, options.Pages);
         var pdf = context.Document.Finish();
         return new(pdf, layout);
     }

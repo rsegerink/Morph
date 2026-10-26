@@ -10,7 +10,7 @@ namespace Morph.Layout;
 /// hold the line. Glyphs then join into words, split at spaces, at gaps no character fills (a tab), and
 /// where the baseline shifts.
 /// </summary>
-sealed class LayoutWalker(PdfRenderContext context)
+sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
 {
     // Two glyphs further apart than this without a character between them are a tab stop, not one word.
     const double tabGapPoints = 1;
@@ -25,13 +25,29 @@ sealed class LayoutWalker(PdfRenderContext context)
     // Each table's own cell paragraphs (not those of tables nested in its cells) to the cell holding them.
     readonly Dictionary<ParagraphElement, LayoutCellRef> cellOf = new(ReferenceEqualityComparer.Instance);
 
+    // Every header and footer paragraph, cell paragraphs included, to the band it belongs to. A paragraph
+    // holding a page field is laid out as a copy per page (Fragmenter.SubstitutePageFields) that keeps the
+    // original's paragraph and run properties; pageFieldBands finds the original back through those.
+    readonly Dictionary<ParagraphElement, LayoutStory> bandOf = new(ReferenceEqualityComparer.Instance);
+    readonly Dictionary<ParagraphProperties, List<ParagraphElement>> pageFieldBands = new(ReferenceEqualityComparer.Instance);
+    readonly HashSet<HeaderFooterContent> bandsSeen = new(ReferenceEqualityComparer.Instance);
+
     // What the items being visited sit inside: the group transforms above them, and the table cell.
     readonly record struct Scope(Matrix3x2 Transform, int? Table, LayoutCellRef? Cell, bool IsRepeatedHeader);
 
-    public LayoutDocument Walk(LaidOutDocument document, PageRange? range)
+    public LayoutDocument Walk(LaidOutDocument laidOut, PageRange? range)
     {
+        AddBands(document.Header, document.Footer, document.FirstPageHeader, document.FirstPageFooter, document.EvenPageHeader, document.EvenPageFooter);
+        foreach (var page in laidOut.Pages)
+        {
+            if (page.Settings.Bands is { } bands)
+            {
+                AddBands(bands.Header, bands.Footer, bands.FirstPageHeader, bands.FirstPageFooter, bands.EvenPageHeader, bands.EvenPageFooter);
+            }
+        }
+
         var pages = new List<LayoutPage>();
-        foreach (var page in document.Pages)
+        foreach (var page in laidOut.Pages)
         {
             if (range is { } bounds &&
                 (page.Number < bounds.Start || page.Number > bounds.End))
@@ -51,9 +67,73 @@ sealed class LayoutWalker(PdfRenderContext context)
         return new(pages, paragraphs, tables);
     }
 
+    void AddBands(params HeaderFooterContent?[] bands)
+    {
+        for (var index = 0; index < bands.Length; index++)
+        {
+            if (bands[index] is { } band &&
+                bandsSeen.Add(band))
+            {
+                // header, footer, first-page header, first-page footer, ...
+                AddBand(band.Elements, index % 2 == 0 ? LayoutStory.Header : LayoutStory.Footer);
+            }
+        }
+    }
+
+    void AddBand(IReadOnlyList<DocumentElement> elements, LayoutStory story)
+    {
+        foreach (var element in elements)
+        {
+            switch (element)
+            {
+                case ParagraphElement paragraph:
+                    bandOf.TryAdd(paragraph, story);
+                    if (paragraph.Runs.Any(_ => _.PageField != PageFieldKind.None))
+                    {
+                        if (!pageFieldBands.TryGetValue(paragraph.Properties, out var originals))
+                        {
+                            pageFieldBands[paragraph.Properties] = originals = [];
+                        }
+
+                        originals.Add(paragraph);
+                    }
+
+                    break;
+                case TableElement table:
+                    foreach (var cell in table.Rows.SelectMany(_ => _.Cells))
+                    {
+                        AddBand(cell.Content, story);
+                    }
+
+                    break;
+            }
+        }
+    }
+
+    // The parsed paragraph a placed line belongs to: itself, or for a band paragraph's page-field copy the
+    // band original whose paragraph and run properties it carries.
+    ParagraphElement Original(ParagraphElement paragraph)
+    {
+        if (bandOf.ContainsKey(paragraph) ||
+            !pageFieldBands.TryGetValue(paragraph.Properties, out var originals))
+        {
+            return paragraph;
+        }
+
+        foreach (var original in originals)
+        {
+            if (original.Runs.Count == paragraph.Runs.Count &&
+                original.Runs.Zip(paragraph.Runs).All(_ => ReferenceEquals(_.First.Properties, _.Second.Properties)))
+            {
+                return original;
+            }
+        }
+
+        return paragraph;
+    }
+
     // The group transforms as PdfPainter.PaintScaledGroup / PaintRotatedGroup push them, and table cells in
-    // the order PdfPainter.PaintTableRow draws them (floats, then content). Header and footer bands as such
-    // are not separated yet.
+    // the order PdfPainter.PaintTableRow draws them (floats, then content).
     void Visit(PlacedItem item, Scope scope, List<LayoutLine> lines)
     {
         switch (item)
@@ -389,6 +469,7 @@ sealed class LayoutWalker(PdfRenderContext context)
 
     int ParagraphIndex(ParagraphElement paragraph, LayoutCellRef? cell)
     {
+        paragraph = Original(paragraph);
         if (!paragraphIndex.TryGetValue(paragraph, out var index))
         {
             index = paragraphs.Count;
@@ -400,7 +481,8 @@ sealed class LayoutWalker(PdfRenderContext context)
                 properties.Numbering is { Text.Length: > 0 } numbering ? numbering.Text : null,
                 properties.Numbering?.Level,
                 paragraph.Source,
-                cellOf.GetValueOrDefault(paragraph) ?? cell));
+                cellOf.GetValueOrDefault(paragraph) ?? cell,
+                bandOf.GetValueOrDefault(paragraph, LayoutStory.Body)));
         }
 
         return index;
