@@ -25,12 +25,15 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
     // Each table's own cell paragraphs (not those of tables nested in its cells) to the cell holding them.
     readonly Dictionary<ParagraphElement, LayoutCellRef> cellOf = new(ReferenceEqualityComparer.Instance);
 
-    // Every header and footer paragraph, cell paragraphs included, to the band it belongs to. A paragraph
+    // Every header, footer and note paragraph, cell paragraphs included, to the story it belongs to. A paragraph
     // holding a page field is laid out as a copy per page (Fragmenter.SubstitutePageFields) that keeps the
     // original's paragraph and run properties; pageFieldBands finds the original back through those.
     readonly Dictionary<ParagraphElement, LayoutStory> bandOf = new(ReferenceEqualityComparer.Instance);
     readonly Dictionary<ParagraphProperties, List<ParagraphElement>> pageFieldBands = new(ReferenceEqualityComparer.Instance);
     readonly HashSet<HeaderFooterContent> bandsSeen = new(ReferenceEqualityComparer.Instance);
+
+    // Every footnote and endnote paragraph to its note's w:id. Fragmenter places them as parsed.
+    readonly Dictionary<ParagraphElement, string> noteOf = new(ReferenceEqualityComparer.Instance);
 
     // What the items being visited sit inside: the group transforms above them, and the table cell.
     readonly record struct Scope(Matrix3x2 Transform, int? Table, LayoutCellRef? Cell, bool IsRepeatedHeader);
@@ -38,6 +41,16 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
     public LayoutDocument Walk(LaidOutDocument laidOut, PageRange? range)
     {
         AddBands(document.Header, document.Footer, document.FirstPageHeader, document.FirstPageFooter, document.EvenPageHeader, document.EvenPageFooter);
+        foreach (var footnote in document.Footnotes)
+        {
+            AddStory(footnote.Elements, LayoutStory.Footnote, footnote.Id);
+        }
+
+        foreach (var endnote in document.Endnotes)
+        {
+            AddStory(endnote.Elements, LayoutStory.Endnote, endnote.Id);
+        }
+
         foreach (var page in laidOut.Pages)
         {
             if (page.Settings.Bands is { } bands)
@@ -75,12 +88,12 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
                 bandsSeen.Add(band))
             {
                 // header, footer, first-page header, first-page footer, ...
-                AddBand(band.Elements, index % 2 == 0 ? LayoutStory.Header : LayoutStory.Footer);
+                AddStory(band.Elements, index % 2 == 0 ? LayoutStory.Header : LayoutStory.Footer, null);
             }
         }
     }
 
-    void AddBand(IReadOnlyList<DocumentElement> elements, LayoutStory story)
+    void AddStory(IReadOnlyList<DocumentElement> elements, LayoutStory story, string? noteId)
     {
         foreach (var element in elements)
         {
@@ -88,6 +101,11 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
             {
                 case ParagraphElement paragraph:
                     bandOf.TryAdd(paragraph, story);
+                    if (noteId != null)
+                    {
+                        noteOf.TryAdd(paragraph, noteId);
+                    }
+
                     if (paragraph.Runs.Any(_ => _.PageField != PageFieldKind.None))
                     {
                         if (!pageFieldBands.TryGetValue(paragraph.Properties, out var originals))
@@ -102,7 +120,7 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
                 case TableElement table:
                     foreach (var cell in table.Rows.SelectMany(_ => _.Cells))
                     {
-                        AddBand(cell.Content, story);
+                        AddStory(cell.Content, story, noteId);
                     }
 
                     break;
@@ -482,7 +500,8 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
                 properties.Numbering?.Level,
                 paragraph.Source,
                 cellOf.GetValueOrDefault(paragraph) ?? cell,
-                bandOf.GetValueOrDefault(paragraph, LayoutStory.Body)));
+                bandOf.GetValueOrDefault(paragraph, LayoutStory.Body),
+                noteOf.GetValueOrDefault(paragraph)));
         }
 
         return index;

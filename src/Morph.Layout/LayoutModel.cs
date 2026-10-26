@@ -46,16 +46,19 @@ public enum LayoutStory
 {
     Body,
     Header,
-    Footer
+    Footer,
+    Footnote,
+    Endnote
 }
 
 /// <summary>
 /// A paragraph's structure as the DOCX states it. <see cref="ListLabel"/> is the marker text Morph
 /// drew ("1.", "a)", "•"); <see cref="Source"/> is the ordinal of the <c>w:p</c> across the document's
-/// parts (main document first, then headers and footers); <see cref="Cell"/> is set for a paragraph in a
+/// parts (main document first, then headers, footers, footnotes and endnotes); <see cref="Cell"/> is set for a paragraph in a
 /// table cell. A header or footer paragraph appears once, with lines on every page that shows it.
+/// <see cref="NoteId"/> is the <c>w:id</c> of the footnote or endnote a note paragraph belongs to.
 /// </summary>
-public sealed record LayoutParagraph(int Index, string? StyleId, string? ListLabel, int? ListLevel, int? Source, LayoutCellRef? Cell = null, LayoutStory Story = LayoutStory.Body);
+public sealed record LayoutParagraph(int Index, string? StyleId, string? ListLabel, int? ListLevel, int? Source, LayoutCellRef? Cell = null, LayoutStory Story = LayoutStory.Body, string? NoteId = null);
 
 /// <summary>
 /// A run of non-space characters as drawn, possibly spanning several runs. <see cref="Box"/> runs
