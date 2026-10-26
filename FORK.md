@@ -7,8 +7,9 @@ origin   = https://github.com/rsegerink/Morph.git   (our fork)
 upstream = https://github.com/Papyrine/Morph.git    (fetch only; push URL disabled)
 ```
 
-Our additions live in their own projects (planned: `src/Morph.Layout`) plus at most one
-`InternalsVisibleTo` line in `src/Morph/Morph.csproj`, so upstream merges stay conflict-free.
+Our additions live in their own projects (`src/Morph.Layout`) plus one `InternalsVisibleTo`
+line each in `src/Morph/Morph.csproj` and `src/Morph.Pdf/Morph.Pdf.csproj`, so upstream merges stay
+conflict-free.
 
 ## Syncing with upstream
 

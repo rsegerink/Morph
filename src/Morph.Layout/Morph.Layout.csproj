@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- rsegerink fork only (see FORK.md): the PDF Morph.Pdf draws plus the positions it drew every word at,
+       from one layout pass. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsAotCompatible>true</IsAotCompatible>
+    <NoWarn>CS0618;CS1591;CS1572</NoWarn>
+    <Description>Convert docx to PDF plus the word positions in it</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Morph.Pdf\Morph.Pdf.csproj" />
+    <PackageReference Include="ProjectDefaults" PrivateAssets="all" />
+    <PackageReference Include="SponsorCheck" PrivateAssets="all" Condition="'$(MORPH_TEST_CONTAINER)' != '1'" />
+  </ItemGroup>
+
+</Project>
