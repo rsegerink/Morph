@@ -10,7 +10,7 @@ namespace Morph.Layout;
 /// hold the line. Glyphs then join into words, split at spaces, at gaps no character fills (a tab), and
 /// where the baseline shifts.
 /// </summary>
-sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
+sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document, Dictionary<int, int> outlineLevels)
 {
     // Two glyphs further apart than this without a character between them are a tab stop, not one word.
     const double tabGapPoints = 1;
@@ -584,7 +584,8 @@ sealed class LayoutWalker(PdfRenderContext context, ParsedDocument document)
                 cellOf.GetValueOrDefault(paragraph) ?? cell,
                 story,
                 noteOf.GetValueOrDefault(paragraph),
-                textBox));
+                textBox,
+                paragraph.Source is { } source && outlineLevels.TryGetValue(source, out var level) ? level : null));
         }
 
         return index;

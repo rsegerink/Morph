@@ -59,8 +59,10 @@ public enum LayoutStory
 /// <see cref="NoteId"/> is the <c>w:id</c> of the footnote or endnote a note paragraph belongs to.
 /// <see cref="InTextBox"/> marks a paragraph inside a text box (<c>w:txbxContent</c>); its
 /// <see cref="Story"/> is still the part the box is anchored in.
+/// <see cref="OutlineLevel"/> is the <c>w:outlineLvl</c> the paragraph has, directly or through its style:
+/// 0 for a top-level heading, null for body text.
 /// </summary>
-public sealed record LayoutParagraph(int Index, string? StyleId, string? ListLabel, int? ListLevel, int? Source, LayoutCellRef? Cell = null, LayoutStory Story = LayoutStory.Body, string? NoteId = null, bool InTextBox = false);
+public sealed record LayoutParagraph(int Index, string? StyleId, string? ListLabel, int? ListLevel, int? Source, LayoutCellRef? Cell = null, LayoutStory Story = LayoutStory.Body, string? NoteId = null, bool InTextBox = false, int? OutlineLevel = null);
 
 /// <summary>
 /// A run of non-space characters as drawn, possibly spanning several runs. <see cref="Box"/> runs
